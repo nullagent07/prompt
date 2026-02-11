@@ -10,14 +10,14 @@ nvidia-smi
 
 docker inspect -f '{{json .Config.Healthcheck}}' vllm_llm
 
-curl -sS http://127.0.0.1:8000/v1/chat/completions \
+curl --noproxy '*' -sS http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "llm",
-    "messages": [
+    "model":"llm",
+    "messages":[
       {"role":"system","content":"You are a helpful assistant."},
       {"role":"user","content":"Скажи одним предложением, что такое TEI."}
     ],
-    "temperature": 0.2,
-    "max_tokens": 64
+    "max_tokens":64,
+    "temperature":0.2
   }' | head -c 400; echo
