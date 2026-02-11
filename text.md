@@ -21,3 +21,9 @@ curl --noproxy '*' -sS http://127.0.0.1:8000/v1/chat/completions \
     "max_tokens":64,
     "temperature":0.2
   }' | head -c 400; echo
+
+-----
+
+
+  curl --noproxy '*' -sS http://127.0.0.1:8000/v1/models | head
+
