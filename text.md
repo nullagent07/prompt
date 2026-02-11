@@ -7,3 +7,6 @@ docker inspect -f '{{.State.Status}} {{.State.Health.Status}} {{.RestartCount}}'
 B) Проверить OOM / GPU ошибки на хосте
 dmesg -T | egrep -i 'oom|killed process|xid|nvrm' | tail -n 80
 nvidia-smi
+
+docker inspect -f '{{json .Config.Healthcheck}}' vllm_llm
+
