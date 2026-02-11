@@ -1,0 +1,142 @@
+version: "3.9"
+
+services:
+  vllm_llm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_llm
+    runtime: nvidia
+    environment:
+      # чтобы локальные запросы не уходили в прокси
+      NO_PROXY: "localhost,127.0.0.1,::1"
+      no_proxy: "localhost,127.0.0.1,::1"
+
+      # модель + тюнинг VRAM
+      VLLM_MODEL: "Qwen/Qwen2.5-32B-Instruct"
+      VLLM_SERVED_MODEL_NAME: "llm"
+      VLLM_PORT: "8000"
+      VLLM_HOST: "0.0.0.0"
+
+      # ===== ключевые параметры распределения VRAM =====
+      VLLM_GPU_MEMORY_UTIL: "0.75"   # было 0.90
+      VLLM_MAX_MODEL_LEN: "4096"     # было 8192 (для стабильного старта)
+
+      # опциональные лимиты (можно пустыми оставить)
+      VLLM_MAX_NUM_SEQS: "32"
+      VLLM_MAX_NUM_BATCHED_TOKENS: "4096"
+
+      # если нужно:
+      # VLLM_DTYPE: "auto"
+      # VLLM_SWAP_SPACE: "16"
+      VLLM_SWAP_SPACE: "16"
+
+    volumes:
+      - compose_hf_cache:/root/.cache/huggingface
+      - compose_vllm_cache:/root/.cache/vllm
+    ports:
+      - "8000:8000"
+    command: >
+      bash -lc '
+        set -e;
+        ARGS="serve ${VLLM_MODEL}
+          --host ${VLLM_HOST}
+          --port ${VLLM_PORT}
+          --served-model-name ${VLLM_SERVED_MODEL_NAME}
+          --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTIL}
+          --max-model-len ${VLLM_MAX_MODEL_LEN}
+          --swap-space ${VLLM_SWAP_SPACE}
+        ";
+
+        # флаги добавляются только если env непустой
+        if [ -n "${VLLM_DTYPE:-}" ]; then ARGS="$ARGS --dtype ${VLLM_DTYPE}"; fi
+        if [ -n "${VLLM_MAX_NUM_SEQS:-}" ]; then ARGS="$ARGS --max-num-seqs ${VLLM_MAX_NUM_SEQS}"; fi
+        if [ -n "${VLLM_MAX_NUM_BATCHED_TOKENS:-}" ]; then ARGS="$ARGS --max-num-batched-tokens ${VLLM_MAX_NUM_BATCHED_TOKENS}"; fi
+
+        echo "Running: vllm $ARGS";
+        exec vllm $ARGS;
+      '
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/health >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 20
+
+  tei_embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:hopper-1.8
+    container_name: tei_embeddings
+    runtime: nvidia
+    environment:
+      NO_PROXY: "localhost,127.0.0.1,::1"
+      no_proxy: "localhost,127.0.0.1,::1"
+
+      # модель эмбеддингов (пример — замени на свою)
+      TEI_MODEL_ID: "BAAI/bge-m3"
+
+      # ===== лимиты, чтобы не убивать CPU/GPU =====
+      TOKENIZATION_WORKERS: "8"          # было 48 в логах — снижаем
+      MAX_CONCURRENT_REQUESTS: "16"
+      MAX_BATCH_TOKENS: "4096"
+      MAX_CLIENT_BATCH_SIZE: "32"
+
+    volumes:
+      - compose_hf_cache:/data
+    ports:
+      - "8081:80"
+    command: >
+      bash -lc '
+        set -e;
+        exec text-embeddings-router
+          --model-id "${TEI_MODEL_ID}"
+          --port 80
+          --tokenization-workers "${TOKENIZATION_WORKERS}"
+          --max-concurrent-requests "${MAX_CONCURRENT_REQUESTS}"
+          --max-batch-tokens "${MAX_BATCH_TOKENS}"
+          --max-client-batch-size "${MAX_CLIENT_BATCH_SIZE}"
+      '
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/health >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 20
+
+  tei_rerank:
+    image: ghcr.io/huggingface/text-embeddings-inference:hopper-1.8
+    container_name: tei_rerank
+    runtime: nvidia
+    environment:
+      NO_PROXY: "localhost,127.0.0.1,::1"
+      no_proxy: "localhost,127.0.0.1,::1"
+
+      # модель реранкера (пример — замени на свою)
+      TEI_MODEL_ID: "BAAI/bge-reranker-v2-m3"
+
+      TOKENIZATION_WORKERS: "8"
+      MAX_CONCURRENT_REQUESTS: "16"
+      MAX_BATCH_TOKENS: "2048"
+      MAX_CLIENT_BATCH_SIZE: "32"
+
+    volumes:
+      - compose_hf_cache:/data
+    ports:
+      - "8082:80"
+    command: >
+      bash -lc '
+        set -e;
+        exec text-embeddings-router
+          --model-id "${TEI_MODEL_ID}"
+          --port 80
+          --tokenization-workers "${TOKENIZATION_WORKERS}"
+          --max-concurrent-requests "${MAX_CONCURRENT_REQUESTS}"
+          --max-batch-tokens "${MAX_BATCH_TOKENS}"
+          --max-client-batch-size "${MAX_CLIENT_BATCH_SIZE}"
+      '
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/health >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  compose_hf_cache:
+    external: true
+  compose_vllm_cache:
+    external: true
