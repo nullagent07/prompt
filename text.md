@@ -32,3 +32,8 @@ curl --noproxy '*' -sS http://127.0.0.1:8000/v1/chat/completions \
 docker exec -it vllm_llm bash -lc "curl -v --max-time 3 http://127.0.0.1:8000/v1/models"
 
 
+docker ps --no-trunc | grep vllm_llm
+docker inspect -f '{{.Config.Cmd}}' vllm_llm
+docker inspect -f '{{.Config.Entrypoint}}' vllm_llm
+docker port vllm_llm
+
