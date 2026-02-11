@@ -27,3 +27,8 @@ curl --noproxy '*' -sS http://127.0.0.1:8000/v1/chat/completions \
 
   curl --noproxy '*' -sS http://127.0.0.1:8000/v1/models | head
 
+
+  docker exec -it vllm_llm bash -lc "curl -v --max-time 3 http://127.0.0.1:8000/health"
+docker exec -it vllm_llm bash -lc "curl -v --max-time 3 http://127.0.0.1:8000/v1/models"
+
+
