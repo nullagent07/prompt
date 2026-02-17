@@ -1,0 +1,10 @@
+# litellm/config.template.yaml
+model_list:
+  - model_name: "${LITELLM_MODEL_NAME}"
+    litellm_params:
+      model: "openai/${LITELLM_MODEL_NAME}"
+      api_base: "${VLLM_INTERNAL_BASE}"
+      api_key: "DUMMY"
+
+general_settings:
+  master_key: "${LITELLM_MASTER_KEY}"
