@@ -1,0 +1,181 @@
+# docker-compose.yml
+version: "3.9"
+
+services:
+  #########################################################
+  # 0) One-shot downloader: кладёт GGUF в volume /models
+  #    Если файл уже есть — ничего не качает.
+  #########################################################
+  llm_model_pull:
+    image: python:3.11-slim
+    container_name: llm_model_pull
+    restart: "no"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      LLM_HF_REPO: ${LLM_HF_REPO}
+      LLM_GGUF_FILE: ${LLM_GGUF_FILE}
+      LLM_MODELS_DIR: ${LLM_MODELS_DIR:-/models}
+    volumes:
+      - llm_models:${LLM_MODELS_DIR:-/models}
+      - hf_cache:/root/.cache/huggingface
+    command: >
+      bash -lc "
+      set -euo pipefail;
+      python -V;
+      pip -q install --no-cache-dir 'huggingface_hub>=0.23.0';
+      TARGET='${LLM_MODELS_DIR:-/models}/${LLM_GGUF_FILE}';
+      if [ -s \"$TARGET\" ]; then
+        echo '[llm_model_pull] GGUF already present:' \"$TARGET\";
+        exit 0;
+      fi;
+      echo '[llm_model_pull] Downloading GGUF to:' \"$TARGET\";
+      python - <<'PY'
+import os
+from huggingface_hub import hf_hub_download
+
+repo = os.environ['LLM_HF_REPO']
+filename = os.environ['LLM_GGUF_FILE']
+models_dir = os.environ.get('LLM_MODELS_DIR', '/models')
+token = os.environ.get('HF_TOKEN') or None
+
+path = hf_hub_download(
+    repo_id=repo,
+    filename=filename,
+    local_dir=models_dir,
+    local_dir_use_symlinks=False,
+    token=token,
+    resume_download=True,
+)
+print('[llm_model_pull] Downloaded:', path)
+PY
+      "
+    networks:
+      - ai-network
+
+  #########################################################
+  # 1) LLM Inference (vLLM) — OpenAI compatible API
+  #########################################################
+  vllm_llm:
+    image: vllm/vllm-openai:latest
+    shm_size: "16g"
+    container_name: vllm_llm
+    restart: unless-stopped
+    privileged: true
+
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      VLLM_LOGGING_LEVEL: ${VLLM_LOGGING_LEVEL:-INFO}
+
+      NCCL_DEBUG: "INFO"
+      NCCL_P2P_DISABLE: "1"
+      NCCL_IB_DISABLE: "1"
+
+      # для bash-command
+      LLM_SERVED_NAME: ${LLM_SERVED_NAME:-llm}
+      LLM_GPU_MEM_UTIL: ${LLM_GPU_MEM_UTIL:-0.92}
+      LLM_MAX_LEN: ${LLM_MAX_LEN:-16384}
+      LLM_SWAP_GB: ${LLM_SWAP_GB:-32}
+      LLM_PREFIX_CACHE: ${LLM_PREFIX_CACHE:-true}
+      LLM_ENFORCE_EAGER: ${LLM_ENFORCE_EAGER:-false}
+      LLM_MODELS_DIR: ${LLM_MODELS_DIR:-/models}
+      LLM_GGUF_FILE: ${LLM_GGUF_FILE}
+
+    ports:
+      - "${LLM_PORT:-8000}:8000"
+
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+      - vllm_cache:/root/.cache/vllm
+      - llm_models:${LLM_MODELS_DIR:-/models}
+
+    depends_on:
+      llm_model_pull:
+        condition: service_completed_successfully
+
+    command: >
+      bash -lc '
+      set -euo pipefail;
+      ARGS="--model ${LLM_MODELS_DIR:-/models}/${LLM_GGUF_FILE}
+            --host 0.0.0.0
+            --port 8000
+            --served-model-name ${LLM_SERVED_NAME:-llm}
+            --dtype auto
+            --gpu-memory-utilization ${LLM_GPU_MEM_UTIL:-0.92}
+            --max-model-len ${LLM_MAX_LEN:-16384}
+            --swap-space ${LLM_SWAP_GB:-32}
+            --disable-log-requests";
+
+      if [ "${LLM_PREFIX_CACHE:-true}" = "true" ]; then
+        ARGS="$ARGS --enable-prefix-caching";
+      fi;
+
+      if [ "${LLM_ENFORCE_EAGER:-false}" = "true" ]; then
+        ARGS="$ARGS --enforce-eager";
+      fi;
+
+      echo "[vllm_llm] Starting vLLM with args: $ARGS";
+      python -m vllm.entrypoints.openai.api_server $ARGS
+      '
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 20
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    networks:
+      - ai-network
+
+  #########################################################
+  # 2) LiteLLM Proxy (единая точка входа + ключ)
+  #########################################################
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm
+    restart: unless-stopped
+
+    environment:
+      LITELLM_PORT: ${LITELLM_PORT:-4000}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
+      LITELLM_MODEL_NAME: ${LITELLM_MODEL_NAME:-llm}
+      VLLM_INTERNAL_BASE: ${VLLM_INTERNAL_BASE:-http://vllm_llm:8000/v1}
+
+    volumes:
+      - ./litellm:/app/litellm:ro
+
+    command: >
+      sh -lc '
+      apk add --no-cache gettext >/dev/null 2>&1 || true;
+      envsubst < /app/litellm/config.template.yaml > /app/litellm/config.yaml;
+      echo "[litellm] Effective config:";
+      cat /app/litellm/config.yaml;
+      litellm --config /app/litellm/config.yaml --port ${LITELLM_PORT:-4000} --host 0.0.0.0
+      '
+
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+
+    depends_on:
+      vllm_llm:
+        condition: service_healthy
+
+    networks:
+      - ai-network
+
+networks:
+  ai-network:
+    external: true
+    name: ai-net
+
+volumes:
+  hf_cache:
+  vllm_cache:
+  llm_models:
